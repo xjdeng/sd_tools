@@ -1,7 +1,7 @@
 import json
 from path import Path as path
 import pandas as pd
-from collections import defaultdict
+from collections import defaultdict, Counter
 
 def convert_fname(fname):
     output = fname
@@ -42,3 +42,30 @@ def folder_report(folder, prefix, n):
     df['values'] = values
     df.sort_values('values', axis=0, ascending= False, inplace = True)
     return df
+
+def find_and_add_substrings(s, t):
+    result = []
+    start = 0
+    while True:
+        index = s.find(t, start)
+        if index == -1:
+            break
+        result.append(s[:index + len(t)])
+        start = index + 1
+    return result
+
+def get_most_common_folders(file_paths, N):
+    folder_counts = Counter()
+    
+    # Count occurrences of each folder
+    for file_path in file_paths:
+        for folder in find_and_add_substrings(file_path, "/"):
+            folder_counts[folder] += 1
+    
+    # Sort folders by counts in descending order
+    sorted_folders = sorted(folder_counts.items(), key=lambda x: x[1], reverse=True)
+    
+    # Select top N folders
+    most_common_folders = sorted_folders[:N]
+    
+    return most_common_folders
