@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 from path import Path as path
+import itertools, random, math
 
 def center_crop(image, a):
     if isinstance(image, str):
@@ -62,9 +63,10 @@ def hash_img(image, hashSize=8):
     diff = resized[:, 1:] > resized[:, :-1]
     return sum([2 ** i for (i, v) in enumerate(diff.flatten()) if v])
 
-def resize_run(srcdir, fnoffset = 0, label = ""):
+def resize_run(srcdir, fnoffset = 0, label = "", dim = 512, destdir = None):
     for i,f in enumerate(path(srcdir).files()):
-        destdir = "{}/512".format(srcdir)
+        if not destdir:
+            destdir = "{}/512".format(srcdir)
         path(destdir).mkdir_p()
         img = cv2.imread(f)
         try:
@@ -72,16 +74,16 @@ def resize_run(srcdir, fnoffset = 0, label = ""):
         except Exception as e:
             print(f, e)
             continue
-        newimg = 255*np.ones((512, 512, 3))
-        new_w = int(round(w*512/h))
-        if new_w > 512:
-            new_h = int(round(h*512/w))
-            img2 = cv2.resize(img, (512, new_h))
-            offset = int(round((512 - new_h)/2))
+        newimg = 255*np.ones((dim, dim, 3))
+        new_w = int(round(w*dim/h))
+        if new_w > dim:
+            new_h = int(round(h*dim/w))
+            img2 = cv2.resize(img, (dim, new_h))
+            offset = int(round((dim - new_h)/2))
             newimg[offset:offset+new_h,:,:] = img2
         else:
-            img2 = cv2.resize(img, (new_w, 512))
-            offset = int(round((512 - new_w)/2))
+            img2 = cv2.resize(img, (new_w, dim))
+            offset = int(round((dim - new_w)/2))
             newimg[:,offset:offset+new_w,:] = img2
         j = i + fnoffset
         cv2.imwrite("{}/{}{}".format(destdir, j, f.ext), newimg)
