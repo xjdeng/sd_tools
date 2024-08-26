@@ -2,6 +2,21 @@ import cv2
 import numpy as np
 from path import Path as path
 import itertools, random, math
+import pandas as pd
+import ast
+import os
+import pyzipper
+import zipfile
+import tempfile
+import sys
+import random
+
+def load_image(im_path):
+    img = cv2.imdecode(np.fromfile(im_path, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+    # Convert to 3 channels if the image has 4 channels
+    if img.shape[2] == 4:
+        img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+    return img
 
 def center_crop(image, a):
     if isinstance(image, str):
@@ -45,6 +60,93 @@ def resize(img, dim = 512):
         img2 = cv2.resize(img, (new_w, dim))
         offset = int(round((dim - new_w)/2))
         newimg[:,offset:offset+new_w,:] = img2
+    return newimg
+
+def resize_image_to_height(image, target_height):
+    # Load the image
+    if isinstance(image, str):
+        image = cv2.imread(image)
+    
+    # Get the original dimensions
+    original_height, original_width = image.shape[:2]
+    
+    # Calculate the new width to preserve the aspect ratio
+    aspect_ratio = original_width / original_height
+    new_width = int(target_height * aspect_ratio)
+    
+    # Resize the image
+    resized_image = cv2.resize(image, (new_width, target_height))
+    
+    return resized_image
+
+def quick_thumbnail(imgpath = "./", outfile = "thumbnail.jpg", images = 3, dims = (1280, 720)):
+    files = [f for f in path(imgpath).files() if f.abspath() != path(outfile).abspath()]
+    random.shuffle(files)
+    queue = []
+    height = None
+    while True:
+        if (len(queue) == images) or (not files):
+            break
+        test = files.pop()
+        img = cv2.imread(test)
+        if img is not None:
+            if height is None:
+                height = img.shape[0]
+            if img.shape[0] != height:
+                img = resize_image_to_height(img, height)
+            queue.append(img)
+    width = sum([img.shape[1] for img in queue])
+    newimg = np.zeros((height, width, 3))
+    offset = 0
+    for img in queue:
+        newimg[:,offset:offset + img.shape[1],:] = img
+        offset += img.shape[1]
+    resized = cv2.resize(newimg, dims)
+    cv2.imwrite(outfile, resized)
+
+
+def resize_bucket(img, buckets = [(1024, 512), (1024, 768), (1024, 1024), (512, 1024), (768, 1024)]):
+    if isinstance(img, str):
+        img = cv2.imread(img)
+    try:
+        h, w = img.shape[0:2]
+    except Exception:
+        return None
+    
+    aspect_ratio = w / h
+    best_bucket = None
+    min_diff = float('inf')
+    
+    # Find the best bucket based on aspect ratio
+    for bucket in buckets:
+        bucket_w, bucket_h = bucket
+        bucket_aspect_ratio = bucket_w / bucket_h
+        diff = abs(aspect_ratio - bucket_aspect_ratio)
+        if diff < min_diff:
+            min_diff = diff
+            best_bucket = bucket
+    
+    if best_bucket is None:
+        return None
+    
+    bucket_w, bucket_h = best_bucket
+    newimg = 255 * np.ones((bucket_h, bucket_w, 3), dtype=np.uint8)
+    
+    # Resize image while maintaining aspect ratio
+    if aspect_ratio > (bucket_w / bucket_h):
+        new_w = bucket_w
+        new_h = int(round(h * bucket_w / w))
+    else:
+        new_h = bucket_h
+        new_w = int(round(w * bucket_h / h))
+    
+    img_resized = cv2.resize(img, (new_w, new_h))
+    
+    # Calculate offsets to center the image
+    offset_y = (bucket_h - new_h) // 2
+    offset_x = (bucket_w - new_w) // 2
+    
+    newimg[offset_y:offset_y + new_h, offset_x:offset_x + new_w, :] = img_resized
     return newimg
 
 def hash_img(image, hashSize=8):
@@ -133,3 +235,177 @@ def replace_substrings(text, replacements):
             start = index + len(replacement)
 
     return replaced_text
+
+def add_text_to_image(img, text, textheight = 0.01, text_color=(0, 0, 0), border_color=(255, 255, 255), \
+                      border_size = 2):
+    # Read the image using OpenCV
+    if isinstance(img, str):
+        img = load_image(img)
+    if img is None:
+        return None
+    # Get image dimensions
+    height, width = img.shape[:2]
+    
+    # Calculate margins
+    left_margin = int(width * 0.01)
+    bottom_margin = int(height * 0.01)
+    
+    # Calculate maximum height of text
+    max_text_height = int(textheight * height)
+    
+    # Choose font and scale
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 1
+    
+    # Adjust font size to fit maximum height
+    text_width, text_height = cv2.getTextSize(text, font, scale, thickness=1)[0]
+    while text_height < max_text_height:
+        scale += 1
+        text_width, text_height = cv2.getTextSize(text, font, scale, thickness=1)[0]
+    
+    # Calculate text position
+    text_position = (left_margin, height - bottom_margin)
+    
+    # Draw text with border
+    
+    img = cv2.putText(img, text, text_position, font, scale, border_color, thickness=border_size, lineType=cv2.LINE_AA)
+    img = cv2.putText(img, text, text_position, font, scale, text_color, thickness=1, lineType=cv2.LINE_AA)
+    return img
+
+def add_text_dir(dir, *args, **kwargs):
+    for f in path(dir).files():
+        img = add_text_to_image(f, *args, **kwargs)
+        if img is None:
+            continue
+        #cv2.imwrite(f, img)
+        is_success, im_buf_arr = cv2.imencode(".jpg", img)
+        im_buf_arr.tofile(f)
+
+def to_gpt_prompt(listoflists, header = None, forbidden = None):
+    if not header:
+        text = "Generate more examples like the following:\n\n"
+    else:
+        text = header.strip() + "\n\n"
+    if not forbidden:
+        forbidden = ["good aesthetic", "good quality", "good contrast", "good blur", "good noise", \
+                     "poor aesthetic", "poor quality", "poor contrast", "poor blur", "poor noise", \
+                     "portrait dimensions", "landscape dimensions"]
+    forbidden = set(forbidden)
+    for i,tags in enumerate(listoflists):
+        tags = [t for t in tags if t not in forbidden]
+        example = ", ".join(tags)
+        text += f"{i+1}: {example}\n\n"
+    text += f"{len(listoflists) + 1}:"
+    return text
+
+def gpt_from_folder(folder, tagcsv, outfile = "output.txt", **kwargs):
+    tagdf = pd.read_csv(tagcsv)
+    tagdict = {row['file']:ast.literal_eval(row['tags']) for _,row in tagdf.iterrows()}
+    lofl = []
+    for f in path(folder).files():
+        tags = tagdict.get(str(f.name))
+        if not tags:
+            continue
+        else:
+            lofl.append(tags)
+    prompt = to_gpt_prompt(lofl, **kwargs)
+    with open(outfile,'w') as f:
+        f.write(prompt)
+
+def calculate_mse(imageA, imageB):
+    # Compute the Mean Squared Error between the two images
+    err = np.sum((imageA.astype("float") - imageB.astype("float")) ** 2)
+    err /= float(imageA.shape[0] * imageA.shape[1])
+    return err
+
+def find_labels(img, mydir):
+    if isinstance(img, str):
+        img = cv2.imread(img)
+    h0,w0 = img.shape[0:2]
+    imgs = []
+    errors = []
+    files = path(mydir).files()
+    for f in files:
+        pic = cv2.imread(f)
+        imgs.append(pic)
+        if pic is None:
+            errors.append(float('inf'))
+        else:
+            h,w = pic.shape[0:2]
+            if (h != h0) or (w != w0):
+                img2 = cv2.resize(img, (w, h))
+            else:
+                img2 = img
+            error = calculate_mse(img2[:,:,0:3], pic[:,:,0:3])
+            errors.append(error)
+    i = np.argmin(errors)
+    tgt = files[i]
+    labelfile = f"{mydir}/{str(tgt.stem)}.txt"
+    if path(labelfile).exists() == False:
+        print(f"Warning: no labels found for {tgt}")
+        return ""
+    with open(labelfile,'r') as f:
+        label = f.read()
+    return label
+
+def convert1024(mydir, srcdir = "512", tgtdir = "1024", offset = 0):
+    path(tgtdir).mkdir_p()
+    for i,f in enumerate(path(mydir).files()):
+        j = i + offset
+        img = cv2.imread(f)
+        if img is None:
+            print("Error in file {}".format(str(f)))
+            continue
+        img512 = resize(img, 512)
+        label = find_labels(img512, srcdir)
+        img1024 = resize(img, 1024)
+        base = f"{tgtdir}/{j}"
+        cv2.imwrite(f"{base}.jpg", img1024)
+        with open(f"{base}.txt",'w') as ff:
+            ff.write(label)
+
+def zip_folder(tgtdir = "./"):
+    tmpdir = tempfile.TemporaryDirectory()
+    dest = f"{tmpdir.name}/pics"
+    path(dest).mkdir_p()
+    for f in path(tgtdir).files():
+        img = cv2.imread(f)
+        if img is not None:
+            destfile = f"{dest}/{str(f.name)}"
+            cv2.imwrite(destfile, img)
+    zip_folder_pyzipper(dest, "./images.zip")
+    tmpdir.cleanup()
+
+def zip_folder_pyzipper(folder_path, output_path):
+    """Zip the contents of an entire folder (with that folder included
+    in the archive). Empty subfolders will be included in the archive
+    as well.
+    """
+    # Retrieve the paths of the folder contents.
+    contents = os.walk(folder_path)
+    try:
+        zip_file = pyzipper.AESZipFile(output_path, 'w', compression=pyzipper.ZIP_DEFLATED)
+        for root, folders, files in contents:
+            for folder_name in folders:
+                absolute_path = os.path.join(root, folder_name)
+                relative_path = os.path.relpath(absolute_path, start=folder_path)
+                zip_file.write(absolute_path, relative_path)
+            for file_name in files:
+                absolute_path = os.path.join(root, file_name)
+                relative_path = os.path.relpath(absolute_path, start=folder_path)
+                zip_file.write(absolute_path, relative_path)
+
+        print(f"'{output_path}' created successfully.")
+
+    except IOError as message:
+        print(message)
+        sys.exit(1)
+    except OSError as message:
+        print(message)
+        sys.exit(1)
+    except zipfile.BadZipfile as message:
+        print(message)
+        sys.exit(1)
+    finally:
+        zip_file.close()
+
