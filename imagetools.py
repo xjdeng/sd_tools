@@ -11,6 +11,14 @@ import tempfile
 import sys
 import random
 
+
+def get_dims512():
+    DIMS512 = [(256, 832), (256, 896), (256, 960), (256, 1024), (320, 704), (320, 768), (448, 576), (384, 640)]
+    tmp = [(x[1],x[0]) for x in DIMS512]
+    DIMS512 += tmp
+    DIMS512.append((512,512))
+    return DIMS512
+
 def load_image(im_path):
     img = cv2.imdecode(np.fromfile(im_path, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
     # Convert to 3 channels if the image has 4 channels
@@ -107,7 +115,7 @@ def quick_thumbnail(imgpath = "./", outfile = "thumbnail.jpg", images = 3, dims 
 
 def resize_bucket(img, buckets = [(1024, 512), (1024, 768), (1024, 1024), (512, 1024), (768, 1024)]):
     if isinstance(img, str):
-        img = cv2.imread(img)
+        img = load_image(img)
     try:
         h, w = img.shape[0:2]
     except Exception:
@@ -128,7 +136,6 @@ def resize_bucket(img, buckets = [(1024, 512), (1024, 768), (1024, 1024), (512, 
     
     if best_bucket is None:
         return None
-    
     bucket_w, bucket_h = best_bucket
     newimg = 255 * np.ones((bucket_h, bucket_w, 3), dtype=np.uint8)
     
@@ -148,6 +155,20 @@ def resize_bucket(img, buckets = [(1024, 512), (1024, 768), (1024, 1024), (512, 
     
     newimg[offset_y:offset_y + new_h, offset_x:offset_x + new_w, :] = img_resized
     return newimg
+
+def resize_run_bucket(srcdir, fnoffset = 0, label = "", buckets = None, destdir = None):
+    if not buckets:
+        buckets = get_dims512()
+    for i,f in enumerate(path(srcdir).files()):
+        if not destdir:
+            destdir = "{}/512".format(srcdir)
+        path(destdir).mkdir_p()
+        newimg = resize_bucket(f, buckets)
+        j = i + fnoffset
+        cv2.imwrite("{}/{}.jpg".format(destdir, j), newimg)
+        with open("{}/{}.txt".format(destdir, j),'w') as ff:
+            ff.write(label)    
+    
 
 def hash_img(image, hashSize=8):
     #float_image = image.astype(np.float64)
@@ -363,6 +384,16 @@ def convert1024(mydir, srcdir = "512", tgtdir = "1024", offset = 0):
         cv2.imwrite(f"{base}.jpg", img1024)
         with open(f"{base}.txt",'w') as ff:
             ff.write(label)
+
+def autocopytraining(mydir = "./", destdir = "512", traindir = "512"):
+    for d in path(mydir).dirs():
+        traindir2 = path(f"{d}/{traindir}")
+        if not traindir2.exists():
+            continue
+        destdir2 = path(f"{destdir}/{str(d.name)}")
+        destdir2.mkdir_p()
+        for f in traindir2.files():
+            f.copy(destdir2)
 
 def zip_folder(tgtdir = "./"):
     tmpdir = tempfile.TemporaryDirectory()
