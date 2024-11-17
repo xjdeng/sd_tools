@@ -69,6 +69,9 @@ def create_slideshow_with_audio(directory, image_duration, mp3_directory, zoom_f
         raise ValueError("No image files found in the specified directory.")
     if not output:
         output = str(path(directory).name) + ".mp4"
+    if path(output).exists():
+        print("Error: output file already exists!")
+        return
     slides = [mp.ImageClip(str(url)).set_fps(25).set_duration(image_duration) for url in image_files]
     slides = [zoom_in_effect(slide, zoom_factor) for slide in slides]  # Apply zoom effect
     video_clip = concatenate_videoclips(slides)
