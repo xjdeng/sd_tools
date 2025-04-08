@@ -21,10 +21,77 @@ def get_dims512():
 
 def load_image(im_path):
     img = cv2.imdecode(np.fromfile(im_path, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+    if img is None:
+        return None
     # Convert to 3 channels if the image has 4 channels
     if img.shape[2] == 4:
         img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
     return img
+
+def rotate_image_90(file_path, left = True):
+    if left:
+        direction = cv2.ROTATE_90_COUNTERCLOCKWISE
+    else:
+        direction = cv2.ROTATE_90_CLOCKWISE
+    try:
+        # Read the image
+        image = cv2.imread(file_path)
+        if image is None:
+            print(f"Error: Unable to read the file '{file_path}'. Make sure the file exists and is an image.")
+            return
+
+        # Rotate the image 90 degrees clockwise
+        rotated_image = cv2.rotate(image, direction)
+
+        # Overwrite the original file
+        cv2.imwrite(file_path, rotated_image)
+        print(f"Image rotated 90 degrees and saved as '{file_path}'.")
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
+def detect_white_borders(img_path, tolerance=3):
+    """
+    Detects if an image contains white borders.
+    
+    Parameters:
+    img_path (str): Path to the image.
+    tolerance (int): Minimum size of the border to detect (in pixels).
+    
+    Returns:
+    bool: True if white borders are detected, False otherwise.
+    """
+    # Load the image
+    img = cv2.imread(img_path)
+    if img is None:
+        raise ValueError(f"Unable to load image: {img_path}")
+    
+    # Check image dimensions
+    h, w, _ = img.shape
+    
+    # Define a white threshold
+    white_threshold = 250  # Slightly less than 255 to account for slight variations
+    
+    # Check top border
+    top_border = np.all(img[:tolerance, :, :] > white_threshold, axis=-1)
+    if np.all(top_border):
+        return True
+    
+    # Check bottom border
+    bottom_border = np.all(img[-tolerance:, :, :] > white_threshold, axis=-1)
+    if np.all(bottom_border):
+        return True
+    
+    # Check left border
+    left_border = np.all(img[:, :tolerance, :] > white_threshold, axis=-1)
+    if np.all(left_border):
+        return True
+    
+    # Check right border
+    right_border = np.all(img[:, -tolerance:, :] > white_threshold, axis=-1)
+    if np.all(right_border):
+        return True
+    
+    return False
 
 def center_crop(image, a):
     if isinstance(image, str):
@@ -87,6 +154,7 @@ def resize_image_to_height(image, target_height):
     
     return resized_image
 
+
 def quick_thumbnail(imgpath = "./", outfile = "thumbnail.jpg", images = 3, dims = (1280, 720)):
     files = [f for f in path(imgpath).files() if f.abspath() != path(outfile).abspath()]
     random.shuffle(files)
@@ -113,7 +181,7 @@ def quick_thumbnail(imgpath = "./", outfile = "thumbnail.jpg", images = 3, dims 
     cv2.imwrite(outfile, resized)
 
 
-def resize_bucket(img, buckets = [(1024, 512), (1024, 768), (1024, 1024), (512, 1024), (768, 1024)]):
+def resize_bucket_old(img, buckets = [(1024, 512), (1024, 768), (1024, 1024), (512, 1024), (768, 1024)]):
     if isinstance(img, str):
         img = load_image(img)
     try:
@@ -156,6 +224,60 @@ def resize_bucket(img, buckets = [(1024, 512), (1024, 768), (1024, 1024), (512, 
     newimg[offset_y:offset_y + new_h, offset_x:offset_x + new_w, :] = img_resized
     return newimg
 
+def resize_bucket(img, buckets = None):
+    return resize_bucket_crop(img, buckets)
+
+def resize_bucket_crop(img, buckets=None):
+    if not buckets:
+        buckets = get_dims512()
+    if isinstance(img, str):
+        img = load_image(img)
+    
+    try:
+        h, w = img.shape[0:2]
+    except Exception:
+        return None
+    
+    aspect_ratio = w / h
+    best_bucket = None
+    min_diff = float('inf')
+    
+    # Find the best bucket based on aspect ratio
+    for bucket in buckets:
+        bucket_w, bucket_h = bucket
+        bucket_aspect_ratio = bucket_w / bucket_h
+        diff = abs(aspect_ratio - bucket_aspect_ratio)
+        if diff < min_diff:
+            min_diff = diff
+            best_bucket = bucket
+    
+    if best_bucket is None:
+        return None
+    
+    bucket_w, bucket_h = best_bucket
+    bucket_aspect_ratio = bucket_w / bucket_h
+    
+    # Crop image while maintaining the closest aspect ratio
+    if aspect_ratio > bucket_aspect_ratio:
+        # Image is too wide, crop width
+        new_w = int(h * bucket_aspect_ratio)
+        new_h = h
+    else:
+        # Image is too tall, crop height
+        new_h = int(w / bucket_aspect_ratio)
+        new_w = w
+    
+    # Compute cropping coordinates
+    start_x = (w - new_w) // 2
+    start_y = (h - new_h) // 2
+    cropped_img = img[start_y:start_y + new_h, start_x:start_x + new_w]
+    
+    # Resize cropped image to exactly match the bucket dimensions
+    resized_img = cv2.resize(cropped_img, (bucket_w, bucket_h))
+    
+    return resized_img
+
+
 def resize_run_bucket(srcdir, fnoffset = 0, label = "", buckets = None, destdir = None):
     if not buckets:
         buckets = get_dims512()
@@ -164,6 +286,9 @@ def resize_run_bucket(srcdir, fnoffset = 0, label = "", buckets = None, destdir 
             destdir = "{}/512".format(srcdir)
         path(destdir).mkdir_p()
         newimg = resize_bucket(f, buckets)
+        if newimg is None:
+            print(f"Warning: no image found in {f}")
+            continue
         j = i + fnoffset
         cv2.imwrite("{}/{}.jpg".format(destdir, j), newimg)
         with open("{}/{}.txt".format(destdir, j),'w') as ff:
@@ -369,7 +494,7 @@ def find_labels(img, mydir):
         label = f.read()
     return label
 
-def convert1024(mydir, srcdir = "512", tgtdir = "1024", offset = 0):
+def convert1024(mydir, srcdir = "512", tgtdir = "1024", do_resize = True, offset = 0):
     path(tgtdir).mkdir_p()
     for i,f in enumerate(path(mydir).files()):
         j = i + offset
@@ -379,7 +504,10 @@ def convert1024(mydir, srcdir = "512", tgtdir = "1024", offset = 0):
             continue
         img512 = resize(img, 512)
         label = find_labels(img512, srcdir)
-        img1024 = resize(img, 1024)
+        if do_resize:
+            img1024 = resize(img, 1024)
+        else:
+            img1024 = img
         base = f"{tgtdir}/{j}"
         cv2.imwrite(f"{base}.jpg", img1024)
         with open(f"{base}.txt",'w') as ff:
@@ -440,3 +568,81 @@ def zip_folder_pyzipper(folder_path, output_path):
     finally:
         zip_file.close()
 
+def blur_image(image, ksize=(199,199)):
+    """
+    Applies Gaussian blur to the image at the specified path.
+
+    Parameters:
+    - image_path (str): Path to the input image.
+    - ksize (tuple): Kernel size for the Gaussian blur. Must be odd integers.
+
+    Returns:
+    - blurred_image (numpy.ndarray): Blurred image.
+    """
+    # Load the image
+    if isinstance(image, str):
+        image = cv2.imread(image)
+
+    if image is None:
+        raise ValueError(f"Could not load image from path: {image_path}")
+
+    # Apply Gaussian blur
+    blurred_image = cv2.GaussianBlur(image, ksize, sigmaX=0)
+
+    return blurred_image
+
+def add_grain(
+    image,
+    strength=0.05,
+    grain_type="gaussian",
+    monochrome=False,
+    selective=False
+):
+    """
+    Adds grain to an image to reduce cartoon-like smoothness.
+
+    Parameters:
+        image (np.ndarray): Input BGR image in uint8 format (0-255).
+        strength (float): Grain strength, typical range [0.01, 0.1].
+        grain_type (str): 'gaussian' or 'uniform' noise.
+        monochrome (bool): If True, applies the same noise to all color channels.
+        selective (bool): If True, applies more grain to dark areas.
+
+    Returns:
+        np.ndarray: Grainy image in uint8 format.
+    """
+
+    # Convert to float32 in [0, 1]
+    if isinstance(image, str):
+        image = cv2.imread(image)
+    img = image.astype(np.float32) / 255.0
+    h, w, c = img.shape
+
+    # Generate noise
+    if monochrome:
+        if grain_type == "gaussian":
+            noise = np.random.normal(0.0, strength, size=(h, w))
+        elif grain_type == "uniform":
+            noise = np.random.uniform(-strength, strength, size=(h, w))
+        else:
+            raise ValueError("grain_type must be 'gaussian' or 'uniform'")
+        noise = np.repeat(noise[:, :, np.newaxis], 3, axis=2)
+    else:
+        if grain_type == "gaussian":
+            noise = np.random.normal(0.0, strength, size=(h, w, c))
+        elif grain_type == "uniform":
+            noise = np.random.uniform(-strength, strength, size=(h, w, c))
+        else:
+            raise ValueError("grain_type must be 'gaussian' or 'uniform'")
+
+    # Optionally weight noise by luminance (for shadows)
+    if selective:
+        luminance = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        weight = 1.0 - luminance  # More grain in dark areas
+        weight = cv2.GaussianBlur(weight, (5, 5), 0)
+        noise *= weight[:, :, np.newaxis]
+
+    # Apply and clip
+    grainy = np.clip(img + noise, 0.0, 1.0)
+
+    return (grainy * 255).astype(np.uint8)
