@@ -10,6 +10,8 @@ import zipfile
 import tempfile
 import sys
 import random
+import piexif
+from PIL import Image, PngImagePlugin
 
 
 def get_dims512():
@@ -18,6 +20,9 @@ def get_dims512():
     DIMS512 += tmp
     DIMS512.append((512,512))
     return DIMS512
+
+def get_dims1024():
+    return [(1024,1024),(1152,896),(896,1152),(1216,832),(832,1216),(1344,768),(768,1344),(1536,640),(640,1536)]
 
 def load_image(im_path):
     img = cv2.imdecode(np.fromfile(im_path, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
@@ -646,3 +651,105 @@ def add_grain(
     grainy = np.clip(img + noise, 0.0, 1.0)
 
     return (grainy * 255).astype(np.uint8)
+
+def create_meme_text_image_opencv(text, max_width_pixels, output_path=None):
+    # Settings
+    font = cv2.FONT_HERSHEY_DUPLEX
+    font_color = (255, 255, 255, 255)  # White text
+    stroke_color = (0, 0, 0, 255)      # Black outline
+    stroke_thickness = 2
+    padding = 10  # Optional
+    initial_font_scale = 1.0
+
+    # Function to measure text size
+    def get_text_size(scale):
+        thickness = max(int(scale * 2), 1)  # Thickness proportional to font scale
+        (w, h), baseline = cv2.getTextSize(text, font, scale, thickness)
+        return w, h, baseline
+
+    # Binary search for max font scale
+    low, high = 0.1, 10.0
+    best_scale = None
+    best_size = (0, 0, 0)
+    
+    for _ in range(20):  # 20 iterations is more than enough
+        mid = (low + high) / 2
+        size = get_text_size(mid)
+        if size[0] <= max_width_pixels:
+            best_scale = mid
+            best_size = size
+            low = mid
+        else:
+            high = mid
+
+    if best_scale is None:
+        raise ValueError("Text cannot fit within the given pixel width.")
+
+    text_width, text_height, baseline = best_size
+    img_width = text_width + 2 * padding
+    img_height = text_height + baseline + 2 * padding
+
+    # Create transparent image
+    img = np.zeros((img_height, img_width, 4), dtype=np.uint8)
+
+    # Center text
+    text_x = padding
+    text_y = padding + text_height
+
+    # Draw outline (stroke)
+    for dx in [-stroke_thickness, 0, stroke_thickness]:
+        for dy in [-stroke_thickness, 0, stroke_thickness]:
+            if dx == 0 and dy == 0:
+                continue
+            cv2.putText(img, text, (text_x + dx, text_y + dy), font, best_scale, stroke_color, thickness=stroke_thickness, lineType=cv2.LINE_AA)
+
+    # Draw main text
+    cv2.putText(img, text, (text_x, text_y), font, best_scale, font_color, thickness=stroke_thickness, lineType=cv2.LINE_AA)
+
+    # Save or return
+    if output_path:
+        cv2.imwrite(output_path, img)
+    return img
+
+def has_exif(img):
+    return "exif" in img.info
+
+def strip_jpeg_metadata(path_in, path_out):
+    try:
+        img = Image.open(path_in)
+        if not has_exif(img):
+            print(f"[SKIP] No EXIF in: {path_in}")
+            return
+
+        img_copy = Image.new(img.mode, img.size)
+        img_copy.putdata(list(img.getdata()))
+        img_copy.save(path_out)  # No EXIF param => EXIF segment removed
+        print(f"[STRIPPED] EXIF removed: {path_in}")
+    except Exception as e:
+        print(f"[ERROR] {path_in}: {e}")
+
+def strip_png_metadata(path_in, path_out):
+    try:
+        img = Image.open(path_in)
+        if not isinstance(img.info, dict) or not img.info:
+            print(f"[SKIP] No metadata in: {path_in}")
+            return
+        clean_img = Image.new(img.mode, img.size)
+        clean_img.putdata(list(img.getdata()))
+        clean_img.save(path_out)
+        print(f"[STRIPPED] PNG metadata removed: {path_in}")
+    except Exception as e:
+        print(f"[ERROR] {path_in}: {e}")
+
+def remove_metadata(p):
+    ext = os.path.splitext(p)[1].lower()
+    path_out = p  # Overwrite in place
+    if ext in [".jpg", ".jpeg"]:
+        strip_jpeg_metadata(p, path_out)
+    elif ext == ".png":
+        strip_png_metadata(p, path_out)
+    else:
+        print(f"[SKIP] Unsupported file type: {p}")
+
+def remove_metadata_dir(p):
+    [remove_metadata(a) for a in path(p).files()]
