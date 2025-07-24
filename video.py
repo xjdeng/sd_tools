@@ -10,6 +10,9 @@ from path import Path as path
 import math
 import random
 import tempfile
+import numpy as np
+from moviepy.audio.AudioClip import AudioArrayClip
+import subprocess
 
 def zoom_in_effect(clip, zoom_ratio=0.04):
     def effect(get_frame, t):
@@ -256,62 +259,58 @@ def bulk_slideshow(directory = "./", minduration = 61, minframe = 3, zoom_factor
             create_slideshow(d, dur, zoom_factor, output = outfile)
 
 def add_random_audio_to_video(source_video_path, target_video_path, mp3_directory):
+    from moviepy.editor import VideoFileClip, AudioFileClip
+    from pydub import AudioSegment
+    import tempfile
+    import os
+    import random
+
     # Load the video to get its duration
     video_clip = VideoFileClip(source_video_path)
     video_duration = video_clip.duration  # Duration in seconds
 
-    # Get a list of all mp3 files in the directory
-    mp3_files_original = [os.path.join(mp3_directory, file) for file in os.listdir(mp3_directory) if file.endswith('.mp3')]
-    
-    # Ensure there are mp3 files available
+    # Get all MP3 files in the directory
+    mp3_files_original = [os.path.join(mp3_directory, file)
+                          for file in os.listdir(mp3_directory) if file.endswith('.mp3')]
+
     if not mp3_files_original:
         raise ValueError("No MP3 files found in the specified directory.")
-    
-    # Create a working copy of the mp3 file list
+
     mp3_files = mp3_files_original.copy()
     audio_segments = []
     current_duration = 0
 
     while current_duration < video_duration:
-        if not mp3_files:  # If the list is exhausted, replenish it
+        if not mp3_files:
             mp3_files = mp3_files_original.copy()
 
         random_mp3 = random.choice(mp3_files)
-        mp3_files.remove(random_mp3)  # Remove the chosen file to avoid immediate repetition
+        mp3_files.remove(random_mp3)
         audio_clip = AudioSegment.from_file(random_mp3)
 
         if current_duration + audio_clip.duration_seconds <= video_duration:
             audio_segments.append(audio_clip)
             current_duration += audio_clip.duration_seconds
         else:
-            # If adding the full clip exceeds the duration, add only a segment of it
             remaining_duration = video_duration - current_duration
-            trimmed_clip = audio_clip[:remaining_duration * 1000]  # Convert seconds to milliseconds
+            trimmed_clip = audio_clip[:int(remaining_duration * 1000)]
             audio_segments.append(trimmed_clip)
             break
 
-    # Combine all audio segments into a single audio track
+    # Combine all segments
     combined_audio = sum(audio_segments)
 
-    # Export the combined audio as a temporary file
-    tempdir = tempfile.TemporaryDirectory()
-    temp_audio_path = f"{tempdir.name}/temp_audio.mp3"
-    combined_audio.export(temp_audio_path, format="mp3")
+    # Save to temporary MP3
+    with tempfile.TemporaryDirectory() as tempdir:
+        temp_audio_path = os.path.join(tempdir, "temp_audio.mp3")
+        combined_audio.export(temp_audio_path, format="mp3", bitrate="192k")
 
-    # Load the combined audio using moviepy
-    final_audio = AudioFileClip(temp_audio_path)
+        # Load and force duration match
+        final_audio = AudioFileClip(temp_audio_path).subclip(0, video_duration)
 
-    # Set the audio of the video clip to the combined audio
-    final_clip = video_clip.set_audio(final_audio)
-
-    # Export the final video
-    final_clip.write_videofile(target_video_path, codec="libx264", audio_codec="aac")
-
-    # Cleanup temporary file
-    try:
-        tempdir.cleanup()
-    except NotADirectoryError:
-        pass
+        # Apply audio to video and export
+        final_clip = video_clip.set_audio(final_audio)
+        final_clip.write_videofile(target_video_path, codec="libx264", audio_codec="aac")
 
     print(f"Video saved as {target_video_path}")
 
@@ -382,3 +381,253 @@ def create_image_video(image_path, duration, output_path="output_image_video.mp4
     except Exception as e:
         print(f"Error: {e}")
         return None
+    
+
+
+def fix_input_video(input_path):
+    """
+    Re-encode a potentially broken video file to a standard format.
+    This function uses ffmpeg to convert the input to H.264 (baseline profile),
+    with yuv420p pixel format, AAC audio at 192k, and faststart metadata for mobile compatibility.
+    """
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+        fixed_path = tmp.name
+    ffmpeg_cmd = [
+        "ffmpeg", "-y", "-i", input_path,
+        "-c:v", "libx264", "-profile:v", "baseline", "-level", "3.0",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k",
+        "-movflags", "+faststart",
+        fixed_path
+    ]
+    subprocess.run(ffmpeg_cmd, check=True)
+    return fixed_path
+
+def join_videos_resize_second(video1_path, video2_path, output_path="joined_video.mp4"):
+    """
+    Fixes and joins two potentially broken video clips into one file.
+    
+    Each input clip is first fixed via ffmpeg to create a standard, Instagram-friendly file.
+    Then, using MoviePy, each fixed clip is re-encoded to a temporary file with uniform parameters
+    (using the dimensions and FPS of the first clip). Finally, ffmpeg’s concat demuxer joins the clips.
+    
+    Parameters:
+        video1_path (str): Path to the first (possibly broken) video.
+        video2_path (str): Path to the second (possibly broken) video.
+        output_path (str): Path to write the final joined video.
+        
+    Returns:
+        str: The output file path on success, or None if an error occurs.
+    """
+    fixed1_path = None
+    fixed2_path = None
+    temp1_path = None
+    temp2_path = None
+    list_filename = None
+
+    try:
+        # Step 1: Fix the input videos.
+        fixed1_path = fix_input_video(video1_path)
+        fixed2_path = fix_input_video(video2_path)
+        
+        # Step 2: Load fixed videos with MoviePy.
+        clip1 = VideoFileClip(fixed1_path)
+        clip2 = VideoFileClip(fixed2_path)
+        
+        # Use the dimensions and FPS of clip1 as the reference.
+        target_size = clip1.size  # [width, height]
+        target_fps = clip1.fps
+        
+        # Resize clip2 if its dimensions differ; match its FPS if needed.
+        if clip2.size != target_size:
+            clip2 = clip2.resize(newsize=target_size)
+        if clip2.fps != target_fps:
+            clip2 = clip2.set_fps(target_fps)
+        
+        # Helper: Ensure the clip has an audio track spanning its full duration.
+        def ensure_audio(clip, audio_fps=44100):
+            if clip.audio is None:
+                duration = clip.duration
+                num_samples = int(duration * audio_fps)
+                silent_audio_array = np.zeros((num_samples, 2), dtype=np.float32)  # stereo silence
+                silent_audio = AudioArrayClip(silent_audio_array, fps=audio_fps)
+                return clip.set_audio(silent_audio)
+            elif clip.audio.duration < clip.duration:
+                return clip.set_audio(clip.audio.set_duration(clip.duration))
+            return clip
+        
+        clip1 = ensure_audio(clip1)
+        clip2 = ensure_audio(clip2)
+        
+        # Step 3: Re-encode each clip to a temporary file with uniform parameters.
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+            temp1_path = tmp.name
+        clip1.write_videofile(
+            temp1_path,
+            codec="libx264",
+            audio_codec="aac",
+            fps=target_fps,
+            preset="medium",
+            audio_bitrate="192k",
+            verbose=False,
+            logger=None
+        )
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+            temp2_path = tmp.name
+        clip2.write_videofile(
+            temp2_path,
+            codec="libx264",
+            audio_codec="aac",
+            fps=target_fps,
+            preset="medium",
+            audio_bitrate="192k",
+            verbose=False,
+            logger=None
+        )
+        
+        # Step 4: Use ffmpeg’s concat demuxer to join the two temporary files.
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt") as file_list:
+            list_filename = file_list.name
+            file_list.write(f"file '{temp1_path}'\n")
+            file_list.write(f"file '{temp2_path}'\n")
+        
+        ffmpeg_cmd = [
+            "ffmpeg", "-y",
+            "-f", "concat", "-safe", "0",
+            "-i", list_filename,
+            "-c:v", "libx264", "-profile:v", "baseline", "-level", "3.0",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart",
+            output_path
+        ]
+        subprocess.run(ffmpeg_cmd, check=True)
+        
+        return output_path
+        
+    except Exception as e:
+        print(f"Error joining videos: {e}")
+        return None
+    finally:
+        # Cleanup all temporary files.
+        for f in [fixed1_path, fixed2_path, temp1_path, temp2_path, list_filename]:
+            if f and os.path.exists(f):
+                os.remove(f)
+
+def insert_still_frame(video_path, image_path, insert_time=None, duration=0.25, output_path="output_with_insert.mp4"):
+    """
+    Inserts a still image into the middle of a video at a given timestamp.
+
+    Parameters:
+        video_path (str):       Path to the input video file.
+        image_path (str):       Path to the image to insert.
+        insert_time (float|None): Time (in seconds) to insert the image. If None, picks a random spot.
+        duration (float):       How many seconds the still frame should last (default 0.25).
+        output_path (str):      Path to save the output video (default "output_with_insert.mp4").
+
+    Returns:
+        str: The output file path.
+    """
+    # Load the source video and drop its audio
+    clip = VideoFileClip(video_path)
+    clip = clip.set_audio(None)
+    video_duration = clip.duration
+    fps = clip.fps
+    size = clip.size
+
+    # Decide where to insert
+    if insert_time is None:
+        insert_time = random.uniform(0, video_duration)
+    else:
+        # clamp to [0, video_duration]
+        insert_time = max(0, min(insert_time, video_duration))
+
+    # Prepare the image clip
+    img_clip = ImageClip(image_path).set_duration(duration).set_fps(fps)
+    img_clip = img_clip.resize(newsize=size)
+
+    # Split the video
+    before = clip.subclip(0, insert_time)
+    after  = clip.subclip(insert_time, video_duration)
+
+    # Concatenate: before + image + after
+    final = concatenate_videoclips([before, img_clip, after], method="compose")
+
+    # Write out with no audio
+    final.write_videofile(
+        output_path,
+        fps=fps,
+        codec="libx264",
+        audio=False
+    )
+
+    return output_path
+
+def _change_hue(clip, hue_shift=None):
+    """
+    Change hue of the video clip by hue_shift degrees (0-360).
+    If hue_shift is None, choose a random shift each run.
+    """
+    if hue_shift is None:
+        hue_shift = random.uniform(-20, 20)  # small random hue change in degrees
+
+    def shift_hue(frame):
+        # Convert frame (H x W x 3) to float32
+        frame = frame.astype(np.float32) / 255.0
+        # Convert to HSV
+        hsv = np.zeros_like(frame)
+        # RGB -> HSV
+        r, g, b = frame[:,:,0], frame[:,:,1], frame[:,:,2]
+        maxc = np.max(frame, axis=2)
+        minc = np.min(frame, axis=2)
+        v = maxc
+        delta = maxc - minc
+        s = delta / (maxc + 1e-8)
+        
+        # Hue calculation
+        hue = np.zeros_like(maxc)
+        mask = delta > 1e-8
+        idx = (maxc == r) & mask
+        hue[idx] = (g[idx] - b[idx]) / delta[idx]
+        idx = (maxc == g) & mask
+        hue[idx] = 2.0 + (b[idx] - r[idx]) / delta[idx]
+        idx = (maxc == b) & mask
+        hue[idx] = 4.0 + (r[idx] - g[idx]) / delta[idx]
+        hue = (hue / 6.0) % 1.0
+        
+        # Shift hue
+        hue = (hue + hue_shift / 360.0) % 1.0
+        
+        # HSV -> RGB
+        i = np.floor(hue * 6).astype(int)
+        f = hue * 6 - i
+        p = v * (1 - s)
+        q = v * (1 - f * s)
+        t = v * (1 - (1 - f) * s)
+        r2, g2, b2 = np.zeros_like(hue), np.zeros_like(hue), np.zeros_like(hue)
+        
+        i_mod = i % 6
+        r2[i_mod == 0], g2[i_mod == 0], b2[i_mod == 0] = v[i_mod == 0], t[i_mod == 0], p[i_mod == 0]
+        r2[i_mod == 1], g2[i_mod == 1], b2[i_mod == 1] = q[i_mod == 1], v[i_mod == 1], p[i_mod == 1]
+        r2[i_mod == 2], g2[i_mod == 2], b2[i_mod == 2] = p[i_mod == 2], v[i_mod == 2], t[i_mod == 2]
+        r2[i_mod == 3], g2[i_mod == 3], b2[i_mod == 3] = p[i_mod == 3], q[i_mod == 3], v[i_mod == 3]
+        r2[i_mod == 4], g2[i_mod == 4], b2[i_mod == 4] = t[i_mod == 4], p[i_mod == 4], v[i_mod == 4]
+        r2[i_mod == 5], g2[i_mod == 5], b2[i_mod == 5] = v[i_mod == 5], p[i_mod == 5], q[i_mod == 5]
+        
+        out = np.stack([r2, g2, b2], axis=2)
+        out = (out * 255).astype(np.uint8)
+        return out
+
+    return clip.fl_image(shift_hue)
+
+def change_hue(clip, disable_audio=True):
+    hue_shift = random.uniform(-20,20)
+    identity = str(abs(hue_shift)).replace(".","")
+    clip_dir = path(clip).abspath().dirname()
+    clip_name = path(clip).stem
+    clip_ext = path(clip).ext
+    outfile = f"{clip_dir}/{clip_name}_{identity}{clip_ext}"
+    myclip = VideoFileClip(clip)
+    clip_hue = _change_hue(myclip, hue_shift)
+    clip_hue.write_videofile(outfile, codec="libx264", audio=not disable_audio)
