@@ -752,4 +752,19 @@ def remove_metadata(p):
         print(f"[SKIP] Unsupported file type: {p}")
 
 def remove_metadata_dir(p):
-    [remove_metadata(a) for a in path(p).files()]
+    [remove_metadata(a) for a in path(p).walkfiles()]
+
+def split_916(imgfile, destdir = "./"):
+    img = cv2.imread(imgfile)
+    h,w = img.shape[0:2]
+    a = int(round(w*16/9))
+    b = int(h-a)
+    img1 = img[0:a,:,:]
+    img2 = img[b:h,:,:]
+    fstem = str(path(imgfile).stem)
+    base = f"{destdir}/{fstem}_"
+    f1 = f"{base}_a.jpg"
+    f2 = f"{base}_b.jpg"
+    cv2.imwrite(f1, img1)
+    cv2.imwrite(f2, img2)
+    return f1, f2
